@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, re, json, uuid, datetime, tempfile, pathlib, asyncio
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
@@ -80,6 +81,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Send '850 cal' (any 2–5 digits + optional kcal) to save & reset.\n"
         "• /status shows pending text/photo count.\n"
         "• /cal estimates calories using AI.\n"
+        "• /stats shows stats for last 7 days.\n"
         "• /discard drops the pending entry."
     )
 
@@ -102,6 +104,39 @@ async def cmd_discard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nothing to discard.")
         return
     await update.message.reply_text("Pending entry discarded.")
+
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show total calories for the last 7 logged days."""
+    if not JSONL_PATH.exists() or JSONL_PATH.stat().st_size == 0:
+        await update.message.reply_text("No entries found.")
+        return
+
+    entries = []
+    with JSONL_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                entries.append(json.loads(line))
+
+    if not entries:
+        await update.message.reply_text("No entries found.")
+        return
+
+    daily_calories = defaultdict(int)
+    for entry in entries:
+        sent_dt = datetime.datetime.strptime(entry["sent"], "%Y-%m-%d %H:%M UTC")
+        sent_date = sent_dt.date()
+        daily_calories[sent_date] += entry["calories"]
+
+    sorted_dates = sorted(daily_calories.keys(), reverse=True)
+    latest_7_dates = sorted_dates[:7]
+
+    reply_lines = ["Total calories for the last 7 logged days:"]
+    for date in latest_7_dates:
+        calories = daily_calories[date]
+        reply_lines.append(f"{date.strftime('%Y-%m-%d')}: {calories} kcal")
+
+    await update.message.reply_text("\n".join(reply_lines))
+
 
 async def cmd_cal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Estimate calories for the pending entry using Google Gemini."""
@@ -225,6 +260,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("discard", cmd_discard))
+    app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("cal", cmd_cal))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
