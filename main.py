@@ -3,19 +3,31 @@ import os, re, json, uuid, datetime, tempfile, pathlib, asyncio
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from google import genai
+
+from PIL import Image
+
+load_dotenv()
 
 # ----- Config -----
 DATA_DIR = pathlib.Path(os.getenv("DATA_DIR", "./data"))
 MEDIA_DIR = DATA_DIR / "media"
 JSONL_PATH = DATA_DIR / "entries.jsonl"
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")  # required
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")  # required for /cal
 CAL_RE = re.compile(r"^\s*(\d{2,5})\s*(k?cal)?\s*$", re.I)
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 JSONL_PATH.touch(exist_ok=True)
+
+# Initialize Gemini if API key is available
+if GEMINI_API_KEY:
+    # genai.configure(api_key=GEMINI_API_KEY) # Old way
+    pass
 
 def utc_now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
@@ -57,16 +69,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Food diary ready.\n"
         "- Send text and/or photos.\n"
-        "- Close with “850 cal”.\n"
-        "Commands: /status, /discard, /help"
+        "- Close with '850 cal'.\n"
+        "Commands: /status, /discard, /cal, /help"
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Usage:\n"
         "• Text/photo starts or updates the current entry.\n"
-        "• Send “850 cal” (any 2–5 digits + optional kcal) to save & reset.\n"
+        "• Send '850 cal' (any 2–5 digits + optional kcal) to save & reset.\n"
         "• /status shows pending text/photo count.\n"
+        "• /cal estimates calories using AI.\n"
         "• /discard drops the pending entry."
     )
 
@@ -89,6 +102,73 @@ async def cmd_discard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nothing to discard.")
         return
     await update.message.reply_text("Pending entry discarded.")
+
+async def cmd_cal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Estimate calories for the pending entry using Google Gemini."""
+    uid = update.effective_user.id
+    pe = state.get(uid)
+
+    if not pe:
+        await update.message.reply_text("No pending entry. Start by sending a message or a photo.")
+        return
+    
+    if not pe.texts and not pe.images:
+        await update.message.reply_text("Your entry is empty. Add text or photos first.")
+        return
+        
+    if not GEMINI_API_KEY:
+        await update.message.reply_text("GEMINI_API_KEY is not set. Cannot estimate calories.")
+        return
+    
+    await update.message.reply_text("Analyzing your meal with Google Gemini...")
+    
+    try:
+        calories = await estimate_calories(pe)
+        await update.message.reply_text(f"Estimated calories: {calories} kcal\nSend '{calories} cal' to save this entry.")
+    except Exception as e:
+        await update.message.reply_text(f"Error estimating calories: {str(e)}")
+
+async def estimate_calories(entry: PendingEntry) -> int:
+    """Estimate calories for a food entry using Google Gemini."""
+
+    # Prepare the model
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    # Create the prompt
+    prompt = """
+    Please analyze this food and estimate the total calories.
+    Respond with ONLY a number representing your calorie estimate.
+    For example: 850
+    """
+    
+    # Add text description
+    content = prompt
+    if entry.description:
+        content += f"\n\nDescription: {entry.description}"
+    
+    # Prepare content for generation
+    generation_content = [content]
+    
+    # Add images if available
+    for img_path in entry.images:
+        img = Image.open(img_path)
+        generation_content.append(img)
+    
+    # Generate response
+    response = await asyncio.to_thread(
+        lambda: client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=generation_content
+        )
+    )
+    
+    # Extract the calorie number from the response
+    calories_text = response.text.strip()
+    calories_match = re.search(r'(\d+)', calories_text)
+    if calories_match:
+        return int(calories_match.group(1))
+    else:
+        raise ValueError(f"Could not extract calorie number from: {calories_text}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -145,6 +225,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("discard", cmd_discard))
+    app.add_handler(CommandHandler("cal", cmd_cal))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.run_polling()
