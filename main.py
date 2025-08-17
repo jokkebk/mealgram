@@ -11,6 +11,8 @@ from google import genai
 
 from PIL import Image
 
+from cmd_time import handle_time_command, TimeCommandError
+
 load_dotenv()
 
 # ----- Config -----
@@ -71,7 +73,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Food diary ready.\n"
         "- Send text and/or photos.\n"
         "- Close with '850 cal'.\n"
-        "Commands: /status, /discard, /cal, /help"
+        "Commands: /status, /discard, /cal, /time, /help"
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -79,6 +81,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Usage:\n"
         "• Text/photo starts or updates the current entry.\n"
         "• Send '850 cal' (any 2–5 digits + optional kcal) to save & reset.\n"
+        "• /time <when> sets a custom time (e.g., '/time yesterday 6 pm').\n"
         "• /status shows pending text/photo count.\n"
         "• /cal estimates calories using AI.\n"
         "• /stats shows stats for last 7 days.\n"
@@ -136,6 +139,23 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_lines.append(f"{date.strftime('%Y-%m-%d')}: {calories} kcal")
 
     await update.message.reply_text("\n".join(reply_lines))
+
+
+async def cmd_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set a custom time for the pending entry."""
+    uid = update.effective_user.id
+    pe = state.get(uid)
+    if not pe:
+        await update.message.reply_text("No pending entry. Start by sending a message or a photo.")
+        return
+
+    try:
+        # We don't have user's timezone, so we'll use the default from cmd_time.py
+        new_dt, conf_msg = handle_time_command(update.message.text)
+        pe.started_at = new_dt
+        await update.message.reply_text(conf_msg)
+    except TimeCommandError as e:
+        await update.message.reply_text(str(e))
 
 
 async def cmd_cal(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -261,6 +281,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("discard", cmd_discard))
     app.add_handler(CommandHandler("report", cmd_report))
+    app.add_handler(CommandHandler("time", cmd_time))
     app.add_handler(CommandHandler("cal", cmd_cal))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
