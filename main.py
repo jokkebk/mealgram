@@ -73,7 +73,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Food diary ready.\n"
         "- Send text and/or photos.\n"
         "- Close with '850 cal'.\n"
-        "Commands: /status, /discard, /cal, /time, /help"
+        "Commands: /status, /discard, /cal, /time, /log, /help"
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -84,7 +84,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /time <when> sets a custom time (e.g., '/time yesterday 6 pm').\n"
         "• /status shows pending text/photo count.\n"
         "• /cal estimates calories using AI.\n"
-        "• /stats shows stats for last 7 days.\n"
+        "• /log shows last 5 entries, /log N shows last N entries.\n"
+        "• /report shows stats for last 7 days.\n"
         "• /discard drops the pending entry."
     )
 
@@ -137,6 +138,50 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for date in latest_7_dates:
         calories = daily_calories[date]
         reply_lines.append(f"{date.strftime('%Y-%m-%d')}: {calories} kcal")
+
+    await update.message.reply_text("\n".join(reply_lines))
+
+
+async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show recent meal entries with date, text and calories."""
+    if not JSONL_PATH.exists() or JSONL_PATH.stat().st_size == 0:
+        await update.message.reply_text("No entries found.")
+        return
+
+    # Parse number of entries to show (default 5)
+    limit = 5
+    if context.args:
+        try:
+            limit = int(context.args[0])
+            if limit <= 0:
+                await update.message.reply_text("Number must be positive.")
+                return
+            if limit > 100:  # reasonable upper limit
+                limit = 100
+        except ValueError:
+            await update.message.reply_text("Invalid number. Usage: /log or /log N")
+            return
+
+    entries = []
+    with JSONL_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                entries.append(json.loads(line))
+
+    if not entries:
+        await update.message.reply_text("No entries found.")
+        return
+
+    # Sort by date (newest first) and take the requested number
+    entries.sort(key=lambda e: e["sent"], reverse=True)
+    recent_entries = entries[:limit]
+
+    reply_lines = [f"Last {len(recent_entries)} entries:"]
+    for entry in recent_entries:
+        date_str = entry["sent"].split()[0]  # Just the date part
+        description = entry["description"].replace("\n", " ")  # Single line
+        calories = entry["calories"]
+        reply_lines.append(f"{date_str}: {description} ({calories} kcal)")
 
     await update.message.reply_text("\n".join(reply_lines))
 
@@ -281,6 +326,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("discard", cmd_discard))
     app.add_handler(CommandHandler("report", cmd_report))
+    app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("time", cmd_time))
     app.add_handler(CommandHandler("cal", cmd_cal))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
