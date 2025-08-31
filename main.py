@@ -230,9 +230,18 @@ async def cmd_cal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def estimate_calories(entry: PendingEntry) -> int:
     """Estimate calories for a food entry using Google Gemini."""
-
-    # Prepare the model
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    import httpcore
+    import httpx
+    
+    # Prepare the model with timeout configuration
+    client = genai.Client(
+        api_key=GEMINI_API_KEY,
+        transport="rest",
+        client_options={
+            "timeout": 30.0,  # 30 second timeout
+            "retry": {"timeout": 60.0}  # Total retry timeout
+        }
+    )
     
     # Create the prompt
     prompt = """
@@ -251,19 +260,41 @@ async def estimate_calories(entry: PendingEntry) -> int:
     
     # Add images if available
     for img_path in entry.images:
-        img = Image.open(img_path)
-        generation_content.append(img)
+        try:
+            img = Image.open(img_path)
+            generation_content.append(img)
+        except Exception as e:
+            raise ValueError(f"Failed to load image {img_path}: {str(e)}")
     
-    # Generate response
-    response = await asyncio.to_thread(
-        lambda: client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=generation_content
-        )
-    )
+    # Generate response with retry logic
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = await asyncio.to_thread(
+                lambda: client.models.generate_content(
+                    model="gemini-1.5-flash",
+                    contents=generation_content
+                )
+            )
+            break
+        except (httpcore.ReadError, httpcore.ConnectError, httpx.ReadError, httpx.ConnectError) as e:
+            if attempt == max_retries - 1:
+                raise ValueError("Network error: Unable to connect to Gemini API. Please check your internet connection and try again.")
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                if attempt == max_retries - 1:
+                    raise ValueError("Request timeout: Gemini API is taking too long to respond. Please try again.")
+                await asyncio.sleep(2 ** attempt)
+            else:
+                raise ValueError(f"Gemini API error: {str(e)}")
     
     # Extract the calorie number from the response
-    calories_text = response.text.strip()
+    try:
+        calories_text = response.text.strip()
+    except Exception as e:
+        raise ValueError(f"Failed to get response text: {str(e)}")
+    
     calories_match = re.search(r'(\d+)', calories_text)
     if calories_match:
         return int(calories_match.group(1))
